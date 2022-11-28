@@ -8,16 +8,11 @@
 
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3" crossorigin="anonymous">
-    <style>
-        [v-cloak] {
-            display: none;
-        }
-    </style>
 </head>
 <body>
-<div class="container" id="app" v-cloak>
+<div class="container" id="app">
     <div>
-        <h2>{{room.name}}</h2>
+        <h2>{{room.roomNickName}}</h2>
     </div>
     <div class="input-group">
         <div class="input-group-prepend">
@@ -29,8 +24,9 @@
         </div>
     </div>
     <ul class="list-group">
-        <li class="list-group-item" v-for="message in messages">
-            {{message.sender}} - {{message.message}}</a>
+        <li class="list-group-item d-flex justify-content-between" v-for="message in roomChats">
+            <p>{{message.chatUserId}} - {{message.chatContent}}</p>
+            <p>{{message.isRead}}</p>
         </li>
     </ul>
     <div></div>
@@ -41,56 +37,167 @@
 <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
 <script>
-    //alert(document.title);
-    // websocket & stomp initialize
-    var sock = new SockJS("/ws-stomp");
+    // 채팅방 입장시
+    // 채팅을 실시간으로 하면서, 나머지는 알림으로 받으면 됩니다.
+
+    // socket 연결할 url 주소
+    let url = 'http://localhost:8080'
+
+    // 소켓 JS 생성 후 이를 Stomp에 탑재
+    var sock = new SockJS(url + "/nawa");
     var ws = Stomp.over(sock);
+    ws.debug = null;
+
+
+    // 채팅방 따로 연결
+    var sock2 = new SockJS(url + "/nawa");
+    var ws2 = Stomp.over(sock2);
+    ws2.debug = null;
+
+
     var reconnect = 0;
+
     // vue.js
     var vm = new Vue({
         el: '#app',
         data: {
-            roomId: '',
-            room: {},
-            sender: '',
-            message: '',
-            messages: []
+            allRoom: [],
+            userId: "",
+            chats: [],
+
+            // 채팅방에서는 이것까지
+            roomId: "",
+            message: "",
+
         },
-        created() {
-            this.roomId = localStorage.getItem('wschat.roomId');
-            this.sender = localStorage.getItem('wschat.sender');
+        mounted() {
+            // 초기 설정
+            this.roomId = localStorage.getItem("roomId")
+            this.userId = localStorage.getItem("userId")
             this.findRoom();
+            this.findChats();
+        },
+        computed: {
+
+            // 방 전체 정보
+            rooms: function() {
+                return this.allRoom.map(room => {
+                    // 1. 같은 방의 채팅, 2. 내가 보낸 채팅 이외, 3. isRead의 합
+                    return {...room, "count": this.chats.filter((chat) => {return chat.roomId == room.roomId && chat.chatUserId != this.userId}).reduce((init, chat) => {return init + chat.isRead}, 0)
+                        , "lastChat": this.chats.filter((chat) => {return chat.roomId == room.roomId}).at(-1)}
+                })
+            },
+
+            // 방 하나 정보
+            room: function() {
+                return this.rooms.filter(room => room.roomId == this.roomId)[0]
+            },
+
+            // 방 하나의 채팅 정보
+            roomChats: function() {
+                return this.chats.filter((chat) => {return chat.roomId == this.room.roomId})
+            }
+        },
+        watch: {
+            // roomId가 null이 아니면 자동으로 채팅방 연결
+            roomId: function() {
+                if (this.roomId != '') {
+                    this.connectRoom()
+                }
+            }
         },
         methods: {
-            findRoom: function() {
-                axios.get('/chat/room/'+this.roomId).then(response => { this.room = response.data; });
-            },
+
+            // 메시지 보내는 양식.
             sendMessage: function() {
-                ws.send("/pub/chat/message", {}, JSON.stringify({type:'TALK', roomId:this.roomId, sender:this.sender, message:this.message}));
+                ws2.send("/pub/chat/message", {}, JSON.stringify({"roomId":this.roomId, "chatUserId":this.userId, "chatContent":this.message}));
                 this.message = '';
             },
+
+            // 모든 채팅방 정보 불러오기
+            findRoom: function () {
+                axios.get(url +'/chat/user/'+this.userId).then(response => {this.allRoom = response.data.allRooms})
+            },
+
+            // 모든 채팅 정보 불러오기
+            findChats: function () {
+                axios.get(url + '/chat/message/user/'+this.userId).then(response => { this.chats = response.data.allChats})
+            },
+
+            // 연결된 서버에 메세지가 왔을 때(채팅방 이외의 서버)
             recvMessage: function(recv) {
-                this.messages.unshift({"type":recv.type,"sender":recv.type=='ENTER'?'[알림]':recv.sender,"message":recv.message})
-            }
+                // 메이트 신청이 온 경우
+                if (recv.chatUserId == 'mateRequest') {
+                    // mateId가 String으로 같이 옴. 모달을 활용해서 바로 수락하거나, 푸시 알림으로 써도 괜찮을듯
+                    alert(recv.detail)
+
+                    // 신고 누적으로 정지 당했을 경우
+                } else if (recv.chatUserId == "reported") {
+                    // 즉시 알림이 옴. 확인 후 바로 로그아웃 되도록 구현하면 좋을 것 같다.
+                    alert(recv.detail)
+
+                } else {
+
+                    // 내가 보낸 메시지가 아닌 경우, 알람으로 띄우기
+                    if (recv.chatUserId != this.userId) {
+                        alert(recv.chatUserId + ': ' + recv.chatContent)
+                    }
+                }
+            },
+
+            // 채팅방 수신 메시지
+            recvRoomMessage: function(recv) {
+                // 상대방 입장시 userId가 In 으로 입장 알림이 오는데, 이 때 채팅 읽음 처리
+                if (recv.chatUserId == "In") {
+                    this.chats.forEach((chat) => {
+                        if (chat.roomId == this.room.roomId && chat.chatUserId != recv.chatContent) {
+                            chat.isRead = 0
+                        }
+                    })
+                } else {
+                    // 채팅방에서 바로 갱신되도록 추가해주기
+                    this.chats.push({
+                        "chatUserId": recv.chatUserId,
+                        "chatId": recv.chatId,
+                        "roomId": recv.roomId,
+                        "chatContent": recv.chatContent,
+                        "chatDate": recv.chatDate,
+                        "isRead": recv.isRead
+                    })
+                }
+
+            },
+
+            connectRoom: function() {
+                ws2.connect({}, function(frame) {
+                    ws2.subscribe("/sub/chat/room/"+vm.$data.roomId, function(message) {
+                        var recv = JSON.parse(message.body);
+                        console.log(recv.data)
+                        vm.recvRoomMessage(recv.data);
+                    }, {"roomId":vm.$data.roomId});
+                    ws2.send("/pub/chat/message", {}, JSON.stringify({"roomId":vm.$data.roomId, "chatUserId":'In', 'chatContent':vm.$data.userId}));
+                });
+            },
         }
     });
 
+    // 채팅방에 연결하는 로직
     function connect() {
-        // pub/sub event
+        // 특정 채팅방을 구독함.
         ws.connect({}, function(frame) {
-            ws.subscribe("/sub/chat/room/"+vm.$data.roomId, function(message) {
+            ws.subscribe("/sub/chat/user/"+vm.$data.userId, function(message) {
+                // 수신된 메시지 처리
                 var recv = JSON.parse(message.body);
-                vm.recvMessage(recv);
+                vm.recvMessage(recv.data);
             });
-            ws.send("/pub/chat/message", {}, JSON.stringify({type:'ENTER', roomId:vm.$data.roomId, sender:vm.$data.sender}));
         }, function(error) {
+            // 연결이 종료되었을 때의 처리. 재연결
             if(reconnect++ <= 5) {
                 setTimeout(function() {
-                    console.log("connection reconnect");
-                    sock = new SockJS("/ws-stomp");
+                    sock = new SockJS(url + "/nawa");
                     ws = Stomp.over(sock);
                     connect();
-                },10*1000);
+                },10 * 1000);
             }
         });
     }

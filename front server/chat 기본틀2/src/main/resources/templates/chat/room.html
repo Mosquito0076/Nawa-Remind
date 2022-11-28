@@ -19,67 +19,139 @@
             <h3>채팅방 리스트</h3>
         </div>
     </div>
-    <div class="input-group">
-        <div class="input-group-prepend">
-            <label class="input-group-text">방제목</label>
-        </div>
-        <input type="text" class="form-control" v-model="room_name" v-on:keyup.enter="createRoom">
-        <div class="input-group-append">
-            <button class="btn btn-primary" type="button" @click="createRoom">채팅방 개설</button>
-        </div>
-    </div>
     <ul class="list-group">
-        <li class="list-group-item list-group-item-action" v-for="item in chatrooms" v-bind:key="item.roomId" v-on:click="enterRoom(item.roomId)">
-            {{item.name}}
+        <li class="list-group-item list-group-item-action" v-for="item in rooms" v-bind:key="item.roomId" v-on:click="enterRoom(item.roomId)">
+            <div class="d-flex justify-content-between">
+                <p>{{item.roomNickName}}</p>
+                <p v-if="item.lastChat">{{item.lastChat.chatContent}}</p>
+                <p v-if="item.lastChat">{{item.lastChat.chatDate}} [{{item.count}}]</p>
+            </div>
         </li>
     </ul>
 </div>
 <!-- JavaScript -->
 <script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
 <script>
+    // 채팅방 목록을 확인하고 있을 때
+    // 여기서부터는 채팅 일일이 저장해야 함
+
+    // socket 연결할 url 주소
+    let url = 'http://localhost:8080'
+
+    // 소켓 JS 생성 후 이를 Stomp에 탑재
+    var sock = new SockJS(url + "/nawa");
+    var ws = Stomp.over(sock);
+    ws.debug = null;
+    var reconnect = 0;
+
+    // vue.js
     var vm = new Vue({
         el: '#app',
         data: {
-            room_name : '',
-            chatrooms: [
-            ]
+            allRoom: [],
+            userId: "",
+            chats: [],
         },
-        created() {
-            this.findAllRoom();
+        mounted() {
+            this.userId = localStorage.getItem("userId")
+            this.findRoom();
+            this.findChats();
+        },
+        computed: {
+            // 방 전체 정보
+            rooms: function() {
+                return this.allRoom.map(room => {
+                    // 1. 같은 방의 채팅, 2. 내가 보낸 채팅 이외, 3. isRead의 합
+                    return {...room, "count": this.chats.filter((chat) => {return chat.roomId == room.roomId && chat.chatUserId != this.userId}).reduce((init, chat) => {return init + chat.isRead}, 0)
+                        , "lastChat": this.chats.filter((chat) => {return chat.roomId == room.roomId}).at(-1)}
+                })
+            },
         },
         methods: {
-            findAllRoom: function() {
-                axios.get('/chat/rooms').then(response => { this.chatrooms = response.data; });
+            // 방 들어가는 로직. 편하신대로 구현하시면 됩니다.
+            // enterRoom: function(roomId) {
+            //     localStorage.setItem("roomId", roomId)
+            //     location.href = '/chat/room/' + String(roomId) // 이건 무시하셔도 됩니다.
+            // },
+
+            // 모든 채팅방 정보 불러오기
+            findRoom: function () {
+                axios.get(url +'/chat/user/'+this.userId).then(response => {this.allRoom = response.data.allRooms})
             },
-            createRoom: function() {
-                if("" === this.room_name) {
-                    alert("방 제목을 입력해 주십시요.");
-                    return;
+
+            // 모든 채팅 정보 불러오기
+            findChats: function () {
+                axios.get(url + '/chat/message/user/'+this.userId).then(response => { this.chats = response.data.allChats})
+            },
+
+            // 연결된 서버에 메세지가 왔을 때
+            recvMessage: function(recv) {
+                // 메이트 신청이 온 경우
+                if (recv.chatUserId == 'mateRequest') {
+                    // mateId가 String으로 같이 옴. 모달을 활용해서 바로 수락하거나, 푸시 알림으로 써도 괜찮을듯
+                    alert(recv.detail)
+
+                    // 신고 누적으로 정지 당했을 경우
+                } else if (recv.chatUserId == "reported") {
+                    // 즉시 알림이 옴. 확인 후 바로 로그아웃 되도록 구현하면 좋을 것 같다.
+                    alert(recv.detail)
+
                 } else {
-                    var params = new URLSearchParams();
-                    params.append("name",this.room_name);
-                    axios.post('/chat/room', params)
-                        .then(
-                            response => {
-                                alert(response.data.name+"방 개설에 성공하였습니다.")
-                                this.room_name = '';
-                                this.findAllRoom();
-                            }
-                        )
-                        .catch( response => { alert("채팅방 개설에 실패하였습니다."); } );
+                    // 채팅 기록들. 매번 받는건 좀 그렇고, 사실 localStorage에 저장하는 것이 가장 좋아보임.
+                    // 맨 마지막 채팅 인덱스를 기반으로 그 이후 채팅 기록을 찾는 등
+
+                    this.chats.push({
+                        "userId":recv.chatUserId,
+                        "chatId":recv.chatId,
+                        "roomId":recv.roomId,
+                        "chatContent":recv.chatContent,
+                        "chatDate":recv.chatDate,
+                        "isRead":recv.isRead
+                    })
+
+                    // 새로 방이 생성되어서 알림이 안 온 경우, 방을 추가해줌. 목록에 띄워야해서.
+                    if (this.rooms.find(room => room.roomId == recv.roomId) == null) {
+                        this.allRoom.push({
+                            "roomId": recv.roomId,
+                            "roomNickName": recv.chatNickName,
+                            "roomUserId": recv.chatUserId,
+                        })
+                    }
+
+                    // 내가 보낸 메시지가 아닌 경우 알람 띄우기
+                    if (recv.chatUserId != this.userId) {
+                        alert(recv.profileImg + recv.chatNickName + ': ' + recv.chatContent)
+                    }
                 }
+
             },
-            enterRoom: function(roomId) {
-                var sender = prompt('대화명을 입력해 주세요.');
-                if(sender != "") {
-                    localStorage.setItem('wschat.sender',sender);
-                    localStorage.setItem('wschat.roomId',roomId);
-                    location.href="/chat/room/enter/"+roomId;
-                }
-            }
         }
     });
+
+    // 채팅방에 연결하는 로직
+    function connect() {
+        // 특정 채팅방을 구독함.
+        ws.connect({}, function(frame) {
+            ws.subscribe("/sub/chat/user/"+vm.$data.userId, function(message) {
+                // 수신된 메시지 처리
+                var recv = JSON.parse(message.body);
+                vm.recvMessage(recv.data)
+            });
+        }, function(error) {
+            // 연결이 종료되었을 때의 처리. 재연결
+            if(reconnect++ <= 5) {
+                setTimeout(function() {
+                    sock = new SockJS(url + "/nawa");
+                    ws = Stomp.over(sock);
+                    connect();
+                },10 * 1000);
+            }
+        });
+    }
+    connect();
 </script>
 </body>
 </html>
