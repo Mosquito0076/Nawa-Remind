@@ -53,8 +53,6 @@ public class ReportService {
 
             // 유저 정보 업데이트
 
-
-
             Map<String, String> message = new HashMap<>();
             message.put("chatUserId", "reported");
             message.put("detail", "신고 회수 누적으로 임시 사용 정지 되었습니다.");
